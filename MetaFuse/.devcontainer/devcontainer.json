@@ -1,0 +1,5 @@
+{
+  "name": "MetaFuse",
+  "image": "mcr.microsoft.com/devcontainers/python:3.10",
+  "postCreateCommand": "apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt"
+}

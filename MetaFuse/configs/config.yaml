@@ -1,0 +1,13 @@
+paths:
+  videos: "data/videos"
+  audio_chunks: "data/audio_chunks"
+  transcripts: "data/transcripts"
+
+models:
+  whisper: "base"
+  embedding: "sentence-transformers/all-MiniLM-L6-v2"
+
+tagger:
+  chunk_length: 30
+  max_chunks: 6
+  top_k_tags: 20
