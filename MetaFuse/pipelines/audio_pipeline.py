@@ -1,16 +1,19 @@
-import hashlib
+import subprocess
 from pathlib import Path
+from utils.config_loader import load_config
 
-CACHE_DIR = Path("data/transcripts")
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+cfg = load_config()
 
-def cache_key(video_path):
-    return hashlib.md5(video_path.read_bytes()).hexdigest()
+def split_audio(video_path):
+    out = Path(cfg["paths"]["audio_chunks"])
+    out.mkdir(parents=True, exist_ok=True)
 
-def load_cache(key):
-    f = CACHE_DIR / f"{key}.txt"
-    return f.read_text() if f.exists() else None
+    subprocess.run([
+        "ffmpeg", "-i", str(video_path),
+        "-ac", "1", "-ar", "16000",
+        "-f", "segment",
+        "-segment_time", str(cfg["tagger"]["chunk_length"]),
+        str(out / "chunk_%03d.wav")
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def save_cache(key, text):
-    f = CACHE_DIR / f"{key}.txt"
-    f.write_text(text)
+    return sorted(out.glob("chunk_*.wav"))
