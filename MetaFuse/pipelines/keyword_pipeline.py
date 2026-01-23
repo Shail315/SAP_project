@@ -1,9 +1,13 @@
-from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
+import numpy as np
 
-kw = KeyBERT(SentenceTransformer("all-MiniLM-L6-v2"))
+class KeywordGenerator:
+    def __init__(self, model_path):
+        self.model = SentenceTransformer(model_path)
 
-def extract_keywords(text, top_n=20):
-    return [k for k, _ in kw.extract_keywords(
-        text, top_n=top_n, use_mmr=True, diversity=0.7
-    )]
+    def generate(self, chunks, top_k=50):
+        emb = self.model.encode(chunks)
+        centroid = emb.mean(axis=0)
+        scores = emb @ centroid
+        idx = scores.argsort()[::-1][:top_k]
+        return [chunks[i] for i in idx]

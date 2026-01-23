@@ -2,12 +2,22 @@ paths:
   videos: "data/videos"
   audio_chunks: "data/audio_chunks"
   transcripts: "data/transcripts"
+  outputs: "data/outputs"
 
 models:
-  whisper: "base"
-  embedding: "sentence-transformers/all-MiniLM-L6-v2"
+  whisper: "small"
+  keyword_encoder: "models/keyword_encoder"
 
-tagger:
-  chunk_length: 30
-  max_chunks: 6
-  top_k_tags: 20
+chunking:
+  audio_chunk_seconds: 30
+  transcript_chunk_words: 300
+
+tags:
+  max_tags: 10
+  min_score: 0.45
+
+llm:
+  provider: "openrouter"
+  model: "openai/gpt-4o-mini"
+  temperature: 0.3
+  max_tokens: 512
