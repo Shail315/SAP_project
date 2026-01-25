@@ -6,3 +6,6 @@ keybert
 joblib
 pyyaml
 numpy
+langchain-openai
+python-dotenv
+gradio

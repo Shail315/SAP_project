@@ -6,7 +6,7 @@ from pipelines.audio_pipeline import split_audio
 from pipelines.transcript_pipeline import transcribe
 from pipelines.keyword_pipeline import extract_keywords
 from pipelines.tag_pipeline import TagRanker
-from pipelines.llm_pipeline import generate_metadata
+from pipelines.llm_pipeline import generate_metadata, refine_tags_with_llm
 
 
 cfg = load_config()
@@ -47,15 +47,22 @@ def run():
 
         # Step 3: Rank and select tags using custom keyword encoder model
         print("\nStep 3: Ranking tags with custom model...")
-        tags = tag_ranker.rank(text, keywords)
-        print(f"✓ Selected top {len(tags)} tags")
+        raw_tags = tag_ranker.rank(text, keywords)
+        print(f"✓ Selected top {len(raw_tags)} raw tags")
 
-        # Step 4: Generate description and caption using LLM
-        print("\nStep 4: Generating metadata with LLM...")
+        # Step 4: Refine tags using LLM (based on transcript + raw tags)
+        print("\nStep 4: Refining tags with LLM...")
+        max_tags = cfg.get("tags", {}).get("max_tags", 10)
+        tags = refine_tags_with_llm(text, raw_tags, max_tags=max_tags)
+        print(f"✓ Refined to {len(tags)} high-quality tags")
+
+        # Step 5: Generate description and caption using LLM
+        print("\nStep 5: Generating metadata with LLM...")
         metadata = generate_metadata(text, tags)
         metadata["tags"] = tags
+        metadata["raw_tags"] = raw_tags  # Keep raw tags for reference
         
-        # Step 5: Save all outputs
+        # Step 6: Save all outputs
         output_file = outputs_dir / f"{video.stem}_metadata.json"
         output_file.write_text(json.dumps(metadata, indent=2))
         print(f"✓ Metadata saved: {output_file}")
