@@ -577,34 +577,3 @@ Our carefully crafted prompts ensure professional, SEO-optimized outputs:
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
----
-
-## 📄 License
-
-See [LICENSE](LICENSE) file for details.
-
----
-
-## 👨‍💻 Author
-
-**Shail Patel**  
-GitHub: [@Shail315](https://github.com/Shail315)
-
----
-
-## 🙏 Acknowledgments
-
-- OpenAI for Whisper model
-- Sentence-Transformers team for the excellent embedding framework
-- Hugging Face for model hosting and infrastructure
-- YouTube for inspiring the use case and providing training data foundation
-
----
-
-<div align="center">
-
-**Built with ❤️ for the content creator community**
-
-Made with Python 🐍 | Powered by AI 🤖
-
-</div>
