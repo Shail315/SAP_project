@@ -272,7 +272,7 @@ def process_transcript_only(transcript_text, progress=gr.Progress()):
 with gr.Blocks(title="MetaFuse - AI Video Metadata Generator") as app:
     
     # Header
-    gr.HTML("""
+    gr.HTML(""" 
         <div class="main-header">
             <h1>🎬 MetaFuse</h1>
             <p>AI-Powered Video Metadata Generator</p>
