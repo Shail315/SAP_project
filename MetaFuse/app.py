@@ -410,8 +410,8 @@ with gr.Blocks(title="MetaFuse - AI Video Metadata Generator") as app:
 
 if __name__ == "__main__":
     app.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
+        server_name="127.0.0.1",
+        server_port=8000,
         share=False,
         show_error=True,
         css=custom_css,
