@@ -1,0 +1,11 @@
+openai-whisper
+torch
+ffmpeg-python
+sentence-transformers
+keybert
+joblib
+pyyaml
+numpy
+langchain-openai
+python-dotenv
+gradio
