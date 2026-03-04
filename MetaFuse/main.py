@@ -36,7 +36,7 @@ def run():
         else:
             print("Step 1: Transcribing audio...")
             chunks = split_audio(video)
-            text = transcribe(chunks)
+            text, timed_segments = transcribe(chunks)
             out_file.write_text(text)
             print(f"✓ Transcript saved: {out_file}")
 

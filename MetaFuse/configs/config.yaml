@@ -18,6 +18,6 @@ tags:
 
 llm:
   provider: "openrouter"
-  model: "openai/gpt-4o-mini"
+  model: "openai/gpt-4o"
   temperature: 0.3
-  max_tokens: 512
+  max_tokens: 1024

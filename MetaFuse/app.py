@@ -1,15 +1,12 @@
 import gradio as gr
 from pathlib import Path
-import json
-import tempfile
-import shutil
 
 from utils.config_loader import load_config
 from pipelines.audio_pipeline import split_audio
 from pipelines.transcript_pipeline import transcribe
 from pipelines.keyword_pipeline import extract_keywords
 from pipelines.tag_pipeline import TagRanker
-from pipelines.llm_pipeline import generate_metadata, refine_tags_with_llm
+from pipelines.llm_pipeline import generate_metadata, refine_tags_with_llm, generate_chapters
 
 cfg = load_config()
 
@@ -118,6 +115,49 @@ label {
     box-shadow: 0 6px 20px rgba(124, 58, 237, 0.5) !important;
 }
 
+/* Secondary / regenerate button */
+.secondary-btn, button.secondary {
+    background: linear-gradient(135deg, #F5F3FF 0%, #EDE9FE 100%) !important;
+    color: #7C3AED !important;
+    font-size: 1.1rem !important;
+    font-weight: 600 !important;
+    padding: 0.8rem 1.5rem !important;
+    border-radius: 12px !important;
+    border: 2px solid #A78BFA !important;
+    transition: all 0.3s ease !important;
+}
+
+.secondary-btn:hover, button.secondary:hover {
+    background: linear-gradient(135deg, #EDE9FE 0%, #DDD6FE 100%) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* Chapter button */
+.chapter-btn {
+    background: linear-gradient(135deg, #0EA5E9 0%, #0284C7 100%) !important;
+    color: white !important;
+    font-size: 1.1rem !important;
+    font-weight: 600 !important;
+    padding: 0.8rem 1.5rem !important;
+    border-radius: 12px !important;
+    border: none !important;
+    box-shadow: 0 4px 12px rgba(14, 165, 233, 0.4) !important;
+    transition: all 0.3s ease !important;
+}
+
+.chapter-btn:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 18px rgba(14, 165, 233, 0.5) !important;
+}
+
+/* Chapters output */
+.chapters-display textarea {
+    font-size: 1.15rem !important;
+    font-family: 'Courier New', monospace !important;
+    color: #1F2937 !important;
+    line-height: 1.8 !important;
+}
+
 /* Result cards */
 .result-card {
     background: white;
@@ -176,114 +216,146 @@ label {
     color: #7C3AED !important;
     font-weight: 500 !important;
 }
-
-/* Hide raw tags completely */
-.hide-element {
-    display: none !important;
-}
 """
 
 
+# ─── Helper: run tags → metadata pipeline ────────────────────────────────────
+def _run_tags_and_metadata(transcript_text, progress, step_offset=0, total_steps=4):
+    """Shared logic: keyword extraction → tag ranking → LLM refinement → metadata."""
+    ranker = get_tag_ranker()
+    max_tags = cfg.get("tags", {}).get("max_tags", 10)
+
+    progress((step_offset + 0) / total_steps, desc=f"Step {step_offset+1}/{total_steps}: Extracting keywords...")
+    keywords = extract_keywords(transcript_text, top_n=50)
+
+    progress((step_offset + 1) / total_steps, desc=f"Step {step_offset+2}/{total_steps}: Ranking tags...")
+    raw_tags = ranker.rank(transcript_text, keywords)
+
+    progress((step_offset + 2) / total_steps, desc=f"Step {step_offset+3}/{total_steps}: Optimizing tags with AI...")
+    refined_tags = refine_tags_with_llm(transcript_text, raw_tags, max_tags=max_tags)
+
+    progress((step_offset + 3) / total_steps, desc=f"Step {step_offset+4}/{total_steps}: Generating metadata...")
+    metadata = generate_metadata(transcript_text, refined_tags)
+
+    title = metadata.get("title", "N/A")
+    description = metadata.get("description", "N/A")
+    caption = metadata.get("caption", "N/A")
+    hashtags = metadata.get("hashtags", "")
+    tags_str = ", ".join(refined_tags) if refined_tags else "N/A"
+    return title, description, caption, hashtags, tags_str
+
+
+# ─── Video tab functions ──────────────────────────────────────────────────────
 def process_video(video_file, progress=gr.Progress()):
-    """Process a video file and generate metadata."""
+    """Full pipeline: audio split → transcription → tags → metadata."""
     if video_file is None:
-        return "Please upload a video file.", "", "", "", ""
-    
+        empty = ("Please upload a video file.", "", "", "", "", "", "", [])
+        return empty
+
     try:
         video_path = Path(video_file)
-        
-        # Step 1: Transcribe
-        progress(0.1, desc="Step 1/5: Extracting audio and transcribing...")
+
+        progress(0.05, desc="Step 1/5: Splitting audio...")
         chunks = split_audio(video_path)
-        transcript = transcribe(chunks)
-        
+
+        progress(0.15, desc="Step 2/5: Transcribing with Whisper...")
+        transcript, timed_segments = transcribe(chunks)
+
         if not transcript or len(transcript.strip()) == 0:
-            return "Failed to generate transcript. Please check the video file.", "", "", "", ""
-        
-        # Step 2: Extract keywords
-        progress(0.4, desc="Step 2/5: Extracting keywords...")
-        keywords = extract_keywords(transcript, top_n=50)
-        
-        # Step 3: Rank tags
-        progress(0.6, desc="Step 3/5: Ranking tags...")
-        ranker = get_tag_ranker()
-        raw_tags = ranker.rank(transcript, keywords)
-        
-        # Step 4: Refine tags with LLM (backend only, not shown to user)
-        progress(0.75, desc="Step 4/5: Optimizing tags...")
-        max_tags = cfg.get("tags", {}).get("max_tags", 10)
-        refined_tags = refine_tags_with_llm(transcript, raw_tags, max_tags=max_tags)
-        
-        # Step 5: Generate metadata
-        progress(0.9, desc="Step 5/5: Generating metadata...")
-        metadata = generate_metadata(transcript, refined_tags)
-        
-        progress(1.0, desc="Complete!")
-        
-        title = metadata.get("title", "N/A")
-        description = metadata.get("description", "N/A")
-        caption = metadata.get("caption", "N/A")
-        tags_str = ", ".join(refined_tags) if refined_tags else "N/A"
-        
-        return transcript, title, description, caption, tags_str
-        
+            return "Failed to generate transcript. Please check the video file.", "", "", "", "", "", "", []
+
+        title, description, caption, hashtags, tags_str = _run_tags_and_metadata(
+            transcript, progress, step_offset=2, total_steps=5
+        )
+        progress(1.0, desc="✅ Complete!")
+
+        # Return outputs + hidden state values (transcript text + timed segments)
+        return transcript, title, description, caption, hashtags, tags_str, transcript, timed_segments
+
+    except Exception as e:
+        return f"Error: {str(e)}", "", "", "", "", "", "", []
+
+
+def regenerate_video(transcript_state, segments_state, progress=gr.Progress()):
+    """Re-run tags + metadata using the already-stored transcript (no re-transcription)."""
+    if not transcript_state or not transcript_state.strip():
+        return "⚠️ No transcript available. Please run Generate Metadata first.", "", "", "", ""
+
+    try:
+        title, description, caption, hashtags, tags_str = _run_tags_and_metadata(
+            transcript_state, progress, step_offset=0, total_steps=4
+        )
+        progress(1.0, desc="✅ Regenerated!")
+        return title, description, caption, hashtags, tags_str
     except Exception as e:
         return f"Error: {str(e)}", "", "", "", ""
 
 
+def generate_chapters_video(segments_state, progress=gr.Progress()):
+    """Generate chapters using real Whisper timestamps from stored state."""
+    progress(0.2, desc="Generating chapters with AI...")
+    if segments_state:
+        result = generate_chapters(timed_segments=segments_state)
+    else:
+        result = "⚠️ No timed segments found. Please run Generate Metadata first."
+    progress(1.0, desc="✅ Chapters ready!")
+    return result
+
+
+# ─── Transcript tab functions ─────────────────────────────────────────────────
 def process_transcript_only(transcript_text, progress=gr.Progress()):
-    """Process an existing transcript to generate metadata."""
+    """Run tags + metadata from a plain-text transcript."""
     if not transcript_text or len(transcript_text.strip()) == 0:
-        return "Please enter a transcript.", "", "", ""
-    
+        return "Please enter a transcript.", "", "", "", ""
+
     try:
-        # Step 1: Extract keywords
-        progress(0.2, desc="Step 1/4: Extracting keywords...")
-        keywords = extract_keywords(transcript_text, top_n=50)
-        
-        # Step 2: Rank tags
-        progress(0.4, desc="Step 2/4: Ranking tags...")
-        ranker = get_tag_ranker()
-        raw_tags = ranker.rank(transcript_text, keywords)
-        
-        # Step 3: Refine tags with LLM (backend only)
-        progress(0.6, desc="Step 3/4: Optimizing tags...")
-        max_tags = cfg.get("tags", {}).get("max_tags", 10)
-        refined_tags = refine_tags_with_llm(transcript_text, raw_tags, max_tags=max_tags)
-        
-        # Step 4: Generate metadata
-        progress(0.85, desc="Step 4/4: Generating metadata...")
-        metadata = generate_metadata(transcript_text, refined_tags)
-        
-        progress(1.0, desc="Complete!")
-        
-        title = metadata.get("title", "N/A")
-        description = metadata.get("description", "N/A")
-        caption = metadata.get("caption", "N/A")
-        tags_str = ", ".join(refined_tags) if refined_tags else "N/A"
-        
-        return title, description, caption, tags_str
-        
+        title, description, caption, hashtags, tags_str = _run_tags_and_metadata(
+            transcript_text, progress, step_offset=0, total_steps=4
+        )
+        progress(1.0, desc="✅ Complete!")
+        return title, description, caption, hashtags, tags_str
     except Exception as e:
-        return f"Error: {str(e)}", "", "", ""
+        return f"Error: {str(e)}", "", "", "", ""
 
 
-# Create Gradio interface with custom theme
-with gr.Blocks(title="MetaFuse - AI Video Metadata Generator") as app:
-    
+def generate_chapters_text(transcript_text, progress=gr.Progress()):
+    """Generate chapters with estimated timestamps from plain transcript text."""
+    if not transcript_text or not transcript_text.strip():
+        return "⚠️ Please enter a transcript first, then generate metadata before generating chapters."
+    progress(0.2, desc="Estimating chapters with AI...")
+    result = generate_chapters(transcript=transcript_text)
+    progress(1.0, desc="✅ Chapters ready!")
+    return result
+
+
+# ─── Gradio UI ────────────────────────────────────────────────────────────────
+with gr.Blocks(css=custom_css, title="MetaFuse - AI Video Metadata Generator",
+               theme=gr.themes.Soft(
+                   primary_hue="purple",
+                   secondary_hue="purple",
+                   neutral_hue="gray",
+                   font=gr.themes.GoogleFont("Inter")
+               )) as app:
+
     # Header
-    gr.HTML(""" 
+    gr.HTML("""
         <div class="main-header">
             <h1>🎬 MetaFuse</h1>
             <p>AI-Powered Video Metadata Generator</p>
         </div>
     """)
-    
+
     with gr.Tabs() as tabs:
-        # Tab 1: Video Upload
+
+        # ── Tab 1: Video Upload ───────────────────────────────────────────────
         with gr.TabItem("📹 Upload Video", id=1):
-            gr.Markdown("### Upload your video to generate optimized metadata", elem_classes=["section-header"])
-            
+            gr.Markdown("### Upload your video to generate optimized metadata",
+                        elem_classes=["section-header"])
+
+            # Hidden states: transcript text and Whisper timed segments
+            transcript_state_v = gr.State("")
+            segments_state_v   = gr.State([])
+
             with gr.Row():
                 with gr.Column(scale=1):
                     video_input = gr.Video(
@@ -291,23 +363,30 @@ with gr.Blocks(title="MetaFuse - AI Video Metadata Generator") as app:
                         sources=["upload"],
                         elem_classes=["upload-area"]
                     )
-                    process_video_btn = gr.Button(
-                        "🚀 Generate Metadata", 
-                        variant="primary", 
-                        size="lg",
-                        elem_classes=["primary-btn"]
-                    )
-            
+                    with gr.Row():
+                        process_video_btn = gr.Button(
+                            "🚀 Generate Metadata",
+                            variant="primary",
+                            size="lg",
+                            elem_classes=["primary-btn"]
+                        )
+                        regenerate_video_btn = gr.Button(
+                            "🔄 Regenerate",
+                            variant="secondary",
+                            size="lg",
+                            elem_classes=["secondary-btn"]
+                        )
+
             gr.Markdown("---")
             gr.Markdown("## 📊 Results", elem_classes=["section-header"])
-            
+
             with gr.Row():
                 transcript_output = gr.Textbox(
                     label="📝 Transcript",
                     lines=6,
                     elem_classes=["large-text"]
                 )
-            
+
             with gr.Row():
                 with gr.Column():
                     title_output_v = gr.Textbox(
@@ -321,32 +400,86 @@ with gr.Blocks(title="MetaFuse - AI Video Metadata Generator") as app:
                         lines=2,
                         elem_classes=["large-text"]
                     )
-            
+
+            with gr.Row():
+                hashtags_output_v = gr.Textbox(
+                    label="#️⃣ Hashtags",
+                    lines=2,
+                    elem_classes=["tags-display"]
+                )
+
             with gr.Row():
                 description_output_v = gr.Textbox(
                     label="📄 Description",
                     lines=4,
                     elem_classes=["large-text"]
                 )
-            
+
             with gr.Row():
                 tags_output_v = gr.Textbox(
                     label="🏷️ Tags",
                     lines=2,
                     elem_classes=["tags-display"]
                 )
-            
+
+            # ── Chapter section (optional) ────────────────────────────────────
+            gr.Markdown("---")
+            gr.HTML("""
+                <div style="background:#F0F9FF; border:2px solid #BAE6FD; border-radius:12px;
+                            padding:1rem 1.5rem; margin:0.5rem 0;">
+                    <strong style="color:#0284C7; font-size:1.1rem;">🎬 Chapter Generation (Optional)</strong><br>
+                    <span style="color:#374151; font-size:0.95rem;">
+                       
+                        Click the button below after metadata has been generated.
+                    </span>
+                </div>
+            """)
+            with gr.Row():
+                generate_chapters_v_btn = gr.Button(
+                    "📑 Generate Chapters",
+                    variant="secondary",
+                    size="lg",
+                    elem_classes=["chapter-btn"]
+                )
+            with gr.Row():
+                chapters_output_v = gr.Textbox(
+                    label="🎬 Video Chapters",
+                    lines=10,
+                    placeholder="Chapters will appear here after clicking Generate Chapters...",
+                    elem_classes=["chapters-display"]
+                )
+
+            # ── Button wiring ─────────────────────────────────────────────────
             process_video_btn.click(
                 fn=process_video,
                 inputs=[video_input],
-                outputs=[transcript_output, title_output_v, description_output_v, caption_output_v, tags_output_v],
+                outputs=[
+                    transcript_output,
+                    title_output_v, description_output_v, caption_output_v, hashtags_output_v, tags_output_v,
+                    transcript_state_v, segments_state_v
+                ],
                 show_progress=True
             )
-        
-        # Tab 2: Transcript Input
+
+            regenerate_video_btn.click(
+                fn=regenerate_video,
+                inputs=[transcript_state_v, segments_state_v],
+                outputs=[title_output_v, description_output_v, caption_output_v, hashtags_output_v, tags_output_v],
+                show_progress=True
+            )
+
+            generate_chapters_v_btn.click(
+                fn=generate_chapters_video,
+                inputs=[segments_state_v],
+                outputs=[chapters_output_v],
+                show_progress=True
+            )
+
+        # ── Tab 2: Paste Transcript ───────────────────────────────────────────
         with gr.TabItem("📝 Paste Transcript", id=2):
-            gr.Markdown("### Already have a transcript? Paste it below for faster processing", elem_classes=["section-header"])
-            
+            gr.Markdown("### Already have a transcript? Paste it below for faster processing",
+                        elem_classes=["section-header"])
+
             with gr.Row():
                 transcript_input = gr.Textbox(
                     label="Your Transcript",
@@ -354,17 +487,24 @@ with gr.Blocks(title="MetaFuse - AI Video Metadata Generator") as app:
                     lines=8,
                     elem_classes=["large-text"]
                 )
-            
-            process_transcript_btn = gr.Button(
-                "🚀 Generate Metadata", 
-                variant="primary", 
-                size="lg",
-                elem_classes=["primary-btn"]
-            )
-            
+
+            with gr.Row():
+                process_transcript_btn = gr.Button(
+                    "🚀 Generate Metadata",
+                    variant="primary",
+                    size="lg",
+                    elem_classes=["primary-btn"]
+                )
+                regenerate_transcript_btn = gr.Button(
+                    "🔄 Regenerate",
+                    variant="secondary",
+                    size="lg",
+                    elem_classes=["secondary-btn"]
+                )
+
             gr.Markdown("---")
             gr.Markdown("## 📊 Results", elem_classes=["section-header"])
-            
+
             with gr.Row():
                 with gr.Column():
                     title_output_t = gr.Textbox(
@@ -378,32 +518,82 @@ with gr.Blocks(title="MetaFuse - AI Video Metadata Generator") as app:
                         lines=2,
                         elem_classes=["large-text"]
                     )
-            
+
+            with gr.Row():
+                hashtags_output_t = gr.Textbox(
+                    label="#️⃣ Hashtags",
+                    lines=2,
+                    elem_classes=["tags-display"]
+                )
+
             with gr.Row():
                 description_output_t = gr.Textbox(
                     label="📄 Description",
                     lines=4,
                     elem_classes=["large-text"]
                 )
-            
+
             with gr.Row():
                 tags_output_t = gr.Textbox(
                     label="🏷️ Tags",
                     lines=2,
                     elem_classes=["tags-display"]
                 )
-            
+
+            # ── Chapter section (optional) ────────────────────────────────────
+            gr.Markdown("---")
+            gr.HTML("""
+                <div style="background:#F0F9FF; border:2px solid #BAE6FD; border-radius:12px;
+                            padding:1rem 1.5rem; margin:0.5rem 0;">
+                    <strong style="color:#0284C7; font-size:1.1rem;">🎬 Chapter Generation (Optional)</strong><br>
+                    <span style="color:#374151; font-size:0.95rem;">
+                        Generate estimated YouTube chapter markers from the transcript text.
+                        Timestamps are AI-estimated based on content structure and pacing.
+                    </span>
+                </div>
+            """)
+            with gr.Row():
+                generate_chapters_t_btn = gr.Button(
+                    "📑 Generate Chapters",
+                    variant="secondary",
+                    size="lg",
+                    elem_classes=["chapter-btn"]
+                )
+            with gr.Row():
+                chapters_output_t = gr.Textbox(
+                    label="🎬 Video Chapters (Estimated)",
+                    lines=10,
+                    placeholder="Chapters will appear here after clicking Generate Chapters...",
+                    elem_classes=["chapters-display"]
+                )
+
+            # ── Button wiring ─────────────────────────────────────────────────
             process_transcript_btn.click(
                 fn=process_transcript_only,
                 inputs=[transcript_input],
-                outputs=[title_output_t, description_output_t, caption_output_t, tags_output_t],
+                outputs=[title_output_t, description_output_t, caption_output_t, hashtags_output_t, tags_output_t],
                 show_progress=True
             )
-    
+
+            regenerate_transcript_btn.click(
+                fn=process_transcript_only,
+                inputs=[transcript_input],
+                outputs=[title_output_t, description_output_t, caption_output_t, hashtags_output_t, tags_output_t],
+                show_progress=True
+            )
+
+            generate_chapters_t_btn.click(
+                fn=generate_chapters_text,
+                inputs=[transcript_input],
+                outputs=[chapters_output_t],
+                show_progress=True
+            )
+
     # Footer
     gr.HTML("""
         <div class="footer-text">
-            <p>💡 <strong>Tip:</strong> Video processing may take a few minutes depending on length. Use the transcript tab for faster results.</p>
+            <p>💡 <strong>Tip:</strong> Use <em>Regenerate</em> to get fresh metadata without re-transcribing.
+               Use <em>Generate Chapters</em> to add YouTube chapter markers anytime.</p>
         </div>
     """)
 
@@ -413,12 +603,6 @@ if __name__ == "__main__":
         server_name="127.0.0.1",
         server_port=8000,
         share=False,
-        show_error=True,
-        css=custom_css,
-        theme=gr.themes.Soft(
-            primary_hue="purple",
-            secondary_hue="purple",
-            neutral_hue="gray",
-            font=gr.themes.GoogleFont("Inter")
-        )
+        show_error=True
     )
+
