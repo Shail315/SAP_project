@@ -12,4 +12,8 @@ gradio
 cloudinary
 google-generativeai
 Pillow
+fastapi
+uvicorn
+python-multipart
+email-validator
 

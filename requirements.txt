@@ -9,3 +9,7 @@ numpy
 langchain-openai
 python-dotenv
 gradio
+fastapi
+uvicorn
+python-multipart
+email-validator
