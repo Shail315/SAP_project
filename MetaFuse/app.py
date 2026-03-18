@@ -6,7 +6,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.config_loader import load_config
 from utils.db import (
     init_db, save_video, save_transcript, save_audio_chunk,
-    get_transcript, upsert_metadata,
+    get_transcript, upsert_metadata, get_all_videos, get_video, get_metadata,
+    delete_video_history,
 )
 from pipelines.audio_pipeline import split_audio
 from pipelines.transcript_pipeline import transcribe
@@ -269,6 +270,24 @@ label {
 
 /* Horizontal rule between sections */
 .section-divider { border-top: 2px solid #E9D5FF; margin: 1.2rem 0; }
+
+/* Two-pane workspace layout */
+.workspace-left,
+.workspace-right {
+    background: #FFFFFF;
+    border: 2px solid #E9D5FF;
+    border-radius: 16px;
+    padding: 1rem;
+    box-shadow: 0 6px 20px rgba(124, 58, 237, 0.08);
+}
+
+.panel-title {
+    color: #6D28D9;
+    font-weight: 800;
+    font-size: 1.05rem;
+    margin: 0 0 0.75rem 0;
+    letter-spacing: 0.02em;
+}
 """
 
 
@@ -286,13 +305,160 @@ def _chapters_wrapper(segments, transcript):
     return generate_chapters(transcript=transcript)
 
 
+def _history_rows(video_ids=None, limit=30):
+    if video_ids:
+        rows = []
+        for vid in [int(v) for v in video_ids][:limit]:
+            video = get_video(vid)
+            if not video:
+                continue
+            metadata = get_metadata(vid)
+            rows.append({
+                "id": vid,
+                "filename": video.get("filename"),
+                "created_at": video.get("created_at"),
+                "title": metadata.get("title"),
+                "thumbnail_url": metadata.get("thumbnail_url"),
+            })
+        return rows
+    return get_all_videos()[:limit]
+
+
+def _render_history_html(video_ids=None, limit=12):
+    """Render recent DB history for the Gradio left panel."""
+    rows = _history_rows(video_ids=video_ids, limit=limit)
+    if not rows:
+        return (
+            '<div style="background:#fff;border:2px solid #E9D5FF;border-radius:12px;'
+            'padding:12px;color:#6B7280;">No history yet. Process a video to see entries here.</div>'
+        )
+
+    items = []
+    for row in rows:
+        title = row.get("title") or "Untitled"
+        filename = row.get("filename") or "Unknown"
+        created = row.get("created_at") or ""
+        items.append(
+            f'<li style="margin:8px 0;padding:10px;border:1px solid #E9D5FF;border-radius:10px;">'
+            f'<div style="font-weight:700;color:#5B21B6;">{title}</div>'
+            f'<div style="font-size:.92rem;color:#374151;">{filename}</div>'
+            f'<div style="font-size:.82rem;color:#6B7280;">{created}</div>'
+            f'</li>'
+        )
+
+    return (
+        '<div style="background:#fff;border:2px solid #E9D5FF;border-radius:12px;padding:12px;">'
+        '<div style="font-weight:800;color:#6D28D9;margin-bottom:8px;">Recent History</div>'
+        f'<ul style="list-style:none;padding:0;margin:0;">{"".join(items)}</ul>'
+        '</div>'
+    )
+
+
+def _history_choices(video_ids=None, limit=30):
+    rows = _history_rows(video_ids=video_ids, limit=limit)
+    choices = []
+    for row in rows:
+        title = row.get("title") or row.get("filename") or "Untitled"
+        created = row.get("created_at") or ""
+        choices.append((f"#{row['id']} · {title} · {created}", str(row["id"])))
+    return choices
+
+
+def _history_selector_update(selected_id=None, video_ids=None):
+    value = str(selected_id) if selected_id is not None else None
+    return gr.update(choices=_history_choices(video_ids=video_ids), value=value)
+
+
+def _update_session_history(video_ids, latest_video_id):
+    ids = [int(v) for v in (video_ids or [])]
+    if latest_video_id:
+        vid = int(latest_video_id)
+        if vid not in ids:
+            ids.insert(0, vid)
+    selected = ids[0] if ids else None
+    return (
+        ids,
+        _render_history_html(video_ids=ids),
+        _history_selector_update(selected_id=selected, video_ids=ids),
+    )
+
+
+def load_history_item(selected_video_id):
+    """Load a past DB entry into the active Upload Video workspace."""
+    if not selected_video_id:
+        return (
+            "⚠️ Select a history item.", "", None, [], [], "", gr.update(visible=False),
+            _render_history_html(), "", "", "", "", "", "", None, "", [],
+            _history_selector_update()
+        )
+
+    try:
+        video_id = int(selected_video_id)
+        video = get_video(video_id)
+        if not video:
+            return (
+                f"⚠️ History item #{selected_video_id} not found.", "", None, [], [], "",
+                gr.update(visible=False), _render_history_html(), "", "", "", "", "", "",
+                None, "", [], _history_selector_update()
+            )
+
+        metadata = get_metadata(video_id)
+        transcript = video.get("transcript") or ""
+
+        tags_text = metadata.get("tags") or ""
+        tags_list = [t.strip() for t in tags_text.split(",") if t.strip()]
+
+        keywords_text = metadata.get("keywords") or ""
+        if keywords_text.strip():
+            raw_tags = [t.strip() for t in keywords_text.split(",") if t.strip()]
+        elif transcript.strip():
+            # Fallback for older rows where keywords were not persisted.
+            raw_tags = _extract_raw_tags(transcript)
+        else:
+            raw_tags = []
+
+        thumb_path = metadata.get("thumbnail_local_path") or None
+        if thumb_path and not Path(thumb_path).exists():
+            thumb_path = None
+
+        thumb_desc = metadata.get("thumbnail_ideas") or ""
+        status = f"✅ Loaded history item  |  DB ID: {video_id}"
+
+        return (
+            status,
+            transcript,
+            video_id,
+            [],
+            raw_tags,
+            video.get("local_path") or "",
+            gr.update(visible=True),
+            _render_history_html(),
+            tags_text,
+            metadata.get("title") or "",
+            metadata.get("description") or "",
+            metadata.get("caption") or "",
+            metadata.get("hashtags") or "",
+            metadata.get("chapters") or "",
+            thumb_path,
+            thumb_desc,
+            tags_list,
+            _history_selector_update(video_id),
+        )
+    except Exception as e:
+        return (
+            f"❌ Failed to load history item: {e}", "", None, [], [], "", gr.update(visible=False),
+            _render_history_html(), "", "", "", "", "", "", None, "", [],
+            _history_selector_update()
+        )
+
+
 # ─── Video Tab – Process ──────────────────────────────────────────────────────
 
 def process_video(video_file, progress=gr.Progress()):
     """Upload to Cloudinary, split audio, transcribe, persist everything to SQLite."""
     if video_file is None:
         return ("⚠️ Please upload a video file.", "", None, [], [], "",
-                gr.update(visible=False))
+                gr.update(visible=False), _render_history_html(), _history_selector_update())
     try:
         video_path = Path(video_file)
 
@@ -338,7 +504,8 @@ def process_video(video_file, progress=gr.Progress()):
 
         if not transcript or not transcript.strip():
             return ("❌ Transcription failed — check the video file.",
-                    "", video_id, [], [], str(local_path), gr.update(visible=False))
+                    "", video_id, [], [], str(local_path), gr.update(visible=False),
+                    _render_history_html(), _history_selector_update(video_id))
 
         save_transcript(video_id, transcript)
 
@@ -350,10 +517,59 @@ def process_video(video_file, progress=gr.Progress()):
         status = (f"✅ Processed  |  DB ID: {video_id}\n"
                   f"{cld_video_msg}\n{cld_audio_msg}")
         return (status, transcript, video_id, timed_segments, raw_tags,
-                str(local_path), gr.update(visible=True))
+            str(local_path), gr.update(visible=True), _render_history_html(),
+            _history_selector_update(video_id))
 
     except Exception as e:
-        return (f"❌ Error: {e}", "", None, [], [], "", gr.update(visible=False))
+        return (f"❌ Error: {e}", "", None, [], [], "", gr.update(visible=False),
+            _render_history_html(), _history_selector_update())
+
+
+def process_video_and_open_workspace(video_file, progress=gr.Progress()):
+    out = process_video(video_file, progress)
+    status = str(out[0] or "")
+    success = status.startswith("✅")
+    upload_notice = "" if success else status
+    return (
+        *out,
+        gr.update(visible=not success),
+        gr.update(visible=success),
+        gr.update(value=upload_notice, visible=bool(upload_notice)),
+    )
+
+
+def go_back_to_upload_step():
+    return gr.update(visible=True), gr.update(visible=False)
+
+
+def delete_selected_history_item(selected_video_id, video_ids):
+    ids = [int(v) for v in (video_ids or [])]
+    if not selected_video_id:
+        return (
+            "⚠️ Select a history item to delete.", "", None, [], [], "", gr.update(visible=False),
+            _render_history_html(video_ids=ids), "", "", "", "", "", "", None, "", [],
+            _history_selector_update(selected_id=(ids[0] if ids else None), video_ids=ids), ids
+        )
+
+    vid = int(selected_video_id)
+    try:
+        delete_video_history(vid)
+    except Exception as e:
+        return (
+            f"❌ Failed to delete history item: {e}", "", None, [], [], "", gr.update(visible=False),
+            _render_history_html(video_ids=ids), "", "", "", "", "", "", None, "", [],
+            _history_selector_update(selected_id=(ids[0] if ids else None), video_ids=ids), ids
+        )
+
+    ids = [x for x in ids if x != vid]
+    next_selected = ids[0] if ids else None
+    return (
+        f"🗑️ Deleted history item  |  DB ID: {vid}",
+        "", None, [], [], "", gr.update(visible=False),
+        _render_history_html(video_ids=ids),
+        "", "", "", "", "", "", None, "", [],
+        _history_selector_update(selected_id=next_selected, video_ids=ids), ids,
+    )
 
 
 # ─── Individual pipeline handlers ─────────────────────────────────────────────
@@ -534,13 +750,15 @@ def regenerate_all_video(video_id, segments, video_path, progress=gr.Progress())
 
 def process_transcript_tab(text, progress=gr.Progress()):
     if not text or not text.strip():
-        return "⚠️ Please paste a transcript.", None, [], gr.update(visible=False)
+        return ("⚠️ Please paste a transcript.", None, [], gr.update(visible=False),
+                _render_history_html(), _history_selector_update())
     progress(0.5, desc="Extracting keywords…")
     raw_tags = _extract_raw_tags(text)
     video_id = save_video("(pasted transcript)", local_path=None)
     save_transcript(video_id, text)
     progress(1.0, desc="✅ Ready!")
-    return f"✅ Stored  |  DB ID: {video_id}", video_id, raw_tags, gr.update(visible=True)
+    return (f"✅ Stored  |  DB ID: {video_id}", video_id, raw_tags,
+            gr.update(visible=True), _render_history_html(), _history_selector_update(video_id))
 
 
 def generate_all_transcript(video_id, transcript, raw_tags, progress=gr.Progress()):
@@ -631,100 +849,167 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
             vid_tags             = gr.State([])
             vid_path             = gr.State("")
             vid_transcript_state = gr.State("")
+            vid_session_history  = gr.State([])
 
-            # ── Upload + Process ──────────────────────────────────────────────
-            with gr.Row():
-                with gr.Column(scale=1):
-                    video_input = gr.Video(label="Drop your video here",
-                                           sources=["upload"],
-                                           elem_classes=["upload-area"])
-                    process_btn = gr.Button("🚀 Process & Upload",
-                                            variant="primary", size="lg",
-                                            elem_classes=["primary-btn"])
+            with gr.Column(visible=True) as upload_step_v:
+                gr.HTML('<div class="panel-title">Upload Video</div>')
+                video_input = gr.Video(label="Drop your video here",
+                                       sources=["upload"],
+                                       elem_classes=["upload-area"])
+                upload_notice_v = gr.Markdown(value="", visible=False)
+                process_btn = gr.Button("🚀 Process & Upload",
+                                        variant="primary", size="lg",
+                                        elem_classes=["primary-btn"])
 
-            status_box_v = gr.Textbox(label="Status", lines=3,
-                                      interactive=False,
-                                      elem_classes=["status-box"])
+            with gr.Column(visible=False) as workspace_step_v:
+                back_btn_v = gr.Button("⬅ Back to Upload",
+                                       variant="secondary",
+                                       elem_classes=["regen-btn"])
 
-            transcript_box_v = gr.Textbox(label="📝 Transcript", lines=6,
-                                          interactive=False,
-                                          elem_classes=["large-text"])
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=4, elem_classes=["workspace-left"]):
+                        gr.HTML('<div class="panel-title">History & Processing</div>')
 
-            # ── Metadata section (hidden until video processed) ───────────────
-            with gr.Column(visible=False) as meta_col_v:
-                gr.HTML('<div class="section-divider"></div>')
+                        status_box_v = gr.Textbox(label="Status", lines=3,
+                                                  interactive=False,
+                                                  elem_classes=["status-box"])
 
-                with gr.Row():
-                    gen_all_btn_v   = gr.Button("⚡ Generate All (parallel)",
-                                                variant="primary", size="lg",
-                                                elem_classes=["primary-btn"])
-                    regen_all_btn_v = gr.Button("🔄 Regenerate All from DB",
-                                                variant="secondary", size="lg",
-                                                elem_classes=["regen-btn"])
+                        transcript_box_v = gr.Textbox(label="📝 Transcript History",
+                                                      lines=15,
+                                                      interactive=False,
+                                                      elem_classes=["large-text"])
 
-                gr.HTML('<div class="section-divider"></div>')
+                        history_selector = gr.Radio(
+                            label="📚 Click History Item to Load",
+                            choices=_history_choices(video_ids=[]),
+                            value=None,
+                            interactive=True,
+                        )
+                        delete_history_btn = gr.Button("🗑️ Delete Selected", variant="secondary",
+                                                       elem_classes=["regen-btn"])
+                        history_html = gr.HTML(value=_render_history_html(video_ids=[]))
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        tags_btn_v = gr.Button("🏷️ Generate Tags", elem_classes=["gen-btn"])
-                    with gr.Column(scale=3):
-                        tags_box_v = gr.Textbox(label="Tags", lines=2,
-                                                elem_classes=["tags-display"])
+                    # Metadata panel intentionally keeps existing widgets and handlers.
+                    with gr.Column(scale=6, elem_classes=["workspace-right"], visible=False) as meta_col_v:
+                        gr.HTML('<div class="panel-title">Metadata Workspace</div>')
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        title_btn_v = gr.Button("🎯 Generate Title", elem_classes=["gen-btn"])
-                    with gr.Column(scale=3):
-                        title_box_v = gr.Textbox(label="Title", lines=2,
-                                                 elem_classes=["large-text"])
+                        with gr.Row():
+                            gen_all_btn_v   = gr.Button("⚡ Generate All (parallel)",
+                                                        variant="primary", size="lg",
+                                                        elem_classes=["primary-btn"])
+                            regen_all_btn_v = gr.Button("🔄 Regenerate",
+                                                        variant="secondary", size="lg",
+                                                        elem_classes=["regen-btn"])
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        desc_btn_v = gr.Button("📄 Generate Description", elem_classes=["gen-btn"])
-                    with gr.Column(scale=3):
-                        desc_box_v = gr.Textbox(label="Description", lines=4,
-                                                elem_classes=["large-text"])
+                        gr.HTML('<div class="section-divider"></div>')
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        caption_btn_v = gr.Button("💬 Generate Caption", elem_classes=["gen-btn"])
-                    with gr.Column(scale=3):
-                        caption_box_v = gr.Textbox(label="Caption", lines=2,
-                                                   elem_classes=["large-text"])
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                tags_btn_v = gr.Button("🏷️ Generate Tags", elem_classes=["gen-btn"])
+                            with gr.Column(scale=3):
+                                tags_box_v = gr.Textbox(label="Tags", lines=2,
+                                                        elem_classes=["tags-display"])
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        hashtags_btn_v = gr.Button("#️⃣ Generate Hashtags", elem_classes=["gen-btn"])
-                    with gr.Column(scale=3):
-                        hashtags_box_v = gr.Textbox(label="Hashtags", lines=2,
-                                                    elem_classes=["tags-display"])
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                title_btn_v = gr.Button("🎯 Generate Title", elem_classes=["gen-btn"])
+                            with gr.Column(scale=3):
+                                title_box_v = gr.Textbox(label="Title", lines=2,
+                                                         elem_classes=["large-text"])
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        chapters_btn_v = gr.Button("🎬 Generate Chapters", elem_classes=["gen-btn"])
-                    with gr.Column(scale=3):
-                        chapters_box_v = gr.Textbox(label="Chapters", lines=8,
-                                                    elem_classes=["chapters-display"])
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                desc_btn_v = gr.Button("📄 Generate Description", elem_classes=["gen-btn"])
+                            with gr.Column(scale=3):
+                                desc_box_v = gr.Textbox(label="Description", lines=4,
+                                                        elem_classes=["large-text"])
 
-                gr.HTML('<div class="section-divider"></div>')
-                gr.Markdown("### 🖼️ Thumbnail  ·  Gemini Vision")
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        thumb_btn_v = gr.Button("🖼️ Generate Thumbnail",
-                                                elem_classes=["gen-btn"])
-                    with gr.Column(scale=3):
-                        thumb_img_v  = gr.Image(label="Thumbnail", type="filepath")
-                        thumb_desc_v = gr.Textbox(label="Gemini Recommendation",
-                                                  lines=4,
-                                                  elem_classes=["large-text"])
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                caption_btn_v = gr.Button("💬 Generate Caption", elem_classes=["gen-btn"])
+                            with gr.Column(scale=3):
+                                caption_box_v = gr.Textbox(label="Caption", lines=2,
+                                                           elem_classes=["large-text"])
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                hashtags_btn_v = gr.Button("#️⃣ Generate Hashtags", elem_classes=["gen-btn"])
+                            with gr.Column(scale=3):
+                                hashtags_box_v = gr.Textbox(label="Hashtags", lines=2,
+                                                            elem_classes=["tags-display"])
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                chapters_btn_v = gr.Button("🎬 Generate Chapters", elem_classes=["gen-btn"])
+                            with gr.Column(scale=3):
+                                chapters_box_v = gr.Textbox(label="Chapters", lines=8,
+                                                            elem_classes=["chapters-display"])
+
+                        gr.HTML('<div class="section-divider"></div>')
+                        gr.Markdown("### 🖼️ Thumbnail  ·  Gemini Vision")
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                thumb_btn_v = gr.Button("🖼️ Generate Thumbnail",
+                                                        elem_classes=["gen-btn"])
+                            with gr.Column(scale=3):
+                                thumb_img_v  = gr.Image(label="Thumbnail", type="filepath")
+                                thumb_desc_v = gr.Textbox(label="Gemini Recommendation",
+                                                          lines=4,
+                                                          elem_classes=["large-text"])
 
             # ── Button wiring ─────────────────────────────────────────────────
 
             process_btn.click(
-                fn=process_video,
+                fn=process_video_and_open_workspace,
                 inputs=[video_input],
                 outputs=[status_box_v, transcript_box_v, vid_id, vid_segments,
-                         vid_raw_tags, vid_path, meta_col_v],
+                         vid_raw_tags, vid_path, meta_col_v, history_html, history_selector,
+                         upload_step_v, workspace_step_v, upload_notice_v],
+                show_progress=True,
+            ).then(
+                fn=lambda t: t,
+                inputs=[transcript_box_v],
+                outputs=[vid_transcript_state],
+            ).then(
+                fn=_update_session_history,
+                inputs=[vid_session_history, vid_id],
+                outputs=[vid_session_history, history_html, history_selector],
+            )
+
+            back_btn_v.click(
+                fn=go_back_to_upload_step,
+                inputs=[],
+                outputs=[upload_step_v, workspace_step_v],
+                show_progress=False,
+            )
+
+            history_selector.change(
+                fn=load_history_item,
+                inputs=[history_selector],
+                outputs=[
+                    status_box_v, transcript_box_v, vid_id, vid_segments,
+                    vid_raw_tags, vid_path, meta_col_v, history_html,
+                    tags_box_v, title_box_v, desc_box_v, caption_box_v,
+                    hashtags_box_v, chapters_box_v, thumb_img_v, thumb_desc_v,
+                    vid_tags, history_selector,
+                ],
+                show_progress=True,
+            ).then(
+                fn=lambda t: t,
+                inputs=[transcript_box_v],
+                outputs=[vid_transcript_state],
+            )
+
+            delete_history_btn.click(
+                fn=delete_selected_history_item,
+                inputs=[history_selector, vid_session_history],
+                outputs=[
+                    status_box_v, transcript_box_v, vid_id, vid_segments,
+                    vid_raw_tags, vid_path, meta_col_v, history_html,
+                    tags_box_v, title_box_v, desc_box_v, caption_box_v,
+                    hashtags_box_v, chapters_box_v, thumb_img_v, thumb_desc_v,
+                    vid_tags, history_selector, vid_session_history,
+                ],
                 show_progress=True,
             ).then(
                 fn=lambda t: t,
@@ -768,16 +1053,15 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
                 outputs=[chapters_box_v],
                 show_progress=True,
             )
-            thumb_btn_v.click(
-                fn=gen_thumbnail,
-                inputs=[vid_id, title_box_v, vid_transcript_state, vid_tags],
-                outputs=[thumb_img_v, thumb_desc_v],
-                show_progress=True,
-            )
+            # thumb_btn_v.click(
+            #     fn=gen_thumbnail,
+            #     inputs=[vid_id, title_box_v, vid_transcript_state, vid_tags],
+            #     outputs=[thumb_img_v, thumb_desc_v],
+            #     show_progress=True,
+            # )
 
             _ALL_V = [tags_box_v, title_box_v, desc_box_v, caption_box_v,
-                      hashtags_box_v, chapters_box_v,
-                      thumb_img_v, thumb_desc_v, vid_tags]
+                      hashtags_box_v, chapters_box_v, vid_tags]
 
             gen_all_btn_v.click(
                 fn=generate_all_video,
@@ -821,7 +1105,7 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
                     gen_all_t_btn   = gr.Button("⚡ Generate All (parallel)",
                                                 variant="primary", size="lg",
                                                 elem_classes=["primary-btn"])
-                    regen_all_t_btn = gr.Button("🔄 Regenerate All from DB",
+                    regen_all_t_btn = gr.Button("🔄 Regenerate",
                                                 variant="secondary", size="lg",
                                                 elem_classes=["regen-btn"])
 
@@ -868,7 +1152,7 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
             process_t_btn.click(
                 fn=process_transcript_tab,
                 inputs=[transcript_input_t],
-                outputs=[status_t, t_id, t_raw_tags, meta_col_t],
+                outputs=[status_t, t_id, t_raw_tags, meta_col_t, history_html, history_selector],
                 show_progress=True,
             )
             tags_btn_t.click(
@@ -935,9 +1219,9 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
 
 
 if __name__ == "__main__":
-    app.launch(
+    app.queue(default_concurrency_limit=2).launch(
         server_name="0.0.0.0",
-        server_port=8000,
+        server_port=8002,
         share=False,
         show_error=True,
     )

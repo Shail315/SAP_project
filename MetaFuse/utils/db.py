@@ -6,8 +6,12 @@ DB_PATH = Path(__file__).parent.parent / "data" / "metafuse.db"
 
 def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # Improve concurrent read/write behavior when Gradio and FastAPI run together.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -302,3 +306,13 @@ def get_video_with_metadata_for_user(video_id, user_id):
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def delete_video_history(video_id):
+    """Delete a video's related history rows from DB."""
+    conn = get_connection()
+    conn.execute("DELETE FROM audio_chunks WHERE video_id = ?", (video_id,))
+    conn.execute("DELETE FROM metadata WHERE video_id = ?", (video_id,))
+    conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+    conn.commit()
+    conn.close()

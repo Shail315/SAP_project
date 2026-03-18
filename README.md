@@ -308,6 +308,23 @@ tags:
   max_tags: 10                       # Maximum number of tags to generate
   min_score: 0.45                    # Minimum similarity score for tag selection
 
+# Full-stack mode (FastAPI auth + React + Gradio)
+# Terminal 1
+cd /workspaces/SAP_project/MetaFuse
+pip install -r requirements.txt
+uvicorn server:api --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2
+cd /workspaces/SAP_project/frontend
+npm install
+npm run dev
+
+# App routes
+# Landing: http://localhost:5173/app
+# Login:   http://localhost:5173/login
+# Signup:  http://localhost:5173/signup
+# Gradio:  http://localhost:8000/gradio
+
 llm:
   provider: "openrouter"             # LLM provider
   model: "openai/gpt-4o-mini"        # Model identifier

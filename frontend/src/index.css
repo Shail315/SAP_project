@@ -1,33 +1,32 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg: #f3f4f6;
-  --bg-accent: #e0e7ff;
-  --card: #ffffff;
-  --text: #111827;
-  --muted: #6b7280;
+  color: #1f2937;
+  background: #ffffff;
 }
 
 body {
   margin: 0;
   font-family: "Manrope", sans-serif;
-  color: var(--text);
   background:
-    radial-gradient(circle at 10% 10%, var(--bg-accent), transparent 35%),
-    radial-gradient(circle at 90% 20%, #dbeafe, transparent 30%),
-    var(--bg);
+    radial-gradient(circle at 10% 10%, rgba(167, 139, 250, 0.22), transparent 35%),
+    radial-gradient(circle at 90% 5%, rgba(124, 58, 237, 0.12), transparent 30%),
+    linear-gradient(180deg, #ffffff 0%, #f5f3ff 55%, #ffffff 100%);
   min-height: 100vh;
 }
 
-h1,
-h2,
-h3,
-h4 {
-  font-family: "Space Grotesk", sans-serif;
+.gradient-text {
+  background: linear-gradient(92deg, #6d28d9 0%, #8b5cf6 30%, #5b21b6 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
-.panel-card {
-  @apply rounded-2xl bg-white shadow-soft border border-slate-100;
+.glass-card {
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(196, 181, 253, 0.7);
 }
