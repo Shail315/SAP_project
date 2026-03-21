@@ -660,6 +660,8 @@ def gen_thumbnail(video_id, title, transcript, tags_list, progress=gr.Progress()
 def generate_all_video(video_id, transcript, raw_tags, segments, video_path,
                        progress=gr.Progress()):
     """Run all pipelines in parallel; yield partial outputs as each finishes."""
+    # Must always match _ALL_V outputs: tags, title, description, caption,
+    # hashtags, chapters, thumb_img, thumb_desc, tags_state.
     empty = ("", "", "", "", "", "", None, "", [])
     if not video_id:
         yield empty
@@ -667,7 +669,6 @@ def generate_all_video(video_id, transcript, raw_tags, segments, video_path,
 
     results = {k: "" for k in ["tags", "title", "description",
                                 "caption", "hashtags", "chapters"]}
-    results.update({"thumb_img": None, "thumb_desc": ""})
     tags_list = []
 
     # Step 1 — refine tags (others depend on them)
@@ -683,8 +684,8 @@ def generate_all_video(video_id, transcript, raw_tags, segments, video_path,
 
     progress(0.22, desc="Tags ready — launching parallel pipelines…")
     yield (results["tags"], results["title"], results["description"],
-           results["caption"], results["hashtags"], results["chapters"],
-           results["thumb_img"], results["thumb_desc"], tags_list)
+            results["caption"], results["hashtags"], results["chapters"],
+            None, "", tags_list)
 
     # Step 2 — everything else in parallel
     futures_map = {}
@@ -707,17 +708,18 @@ def generate_all_video(video_id, transcript, raw_tags, segments, video_path,
             try:
                 value = future.result()
                 if key == "thumbnail":
-                    results["thumb_img"], cloudinary_url, results["thumb_desc"] = value
-                    if results["thumb_img"]:
+                    thumb_img, cloudinary_url, _prompt_used = value
+                    if thumb_img:
                         upsert_metadata(video_id,
                                         thumbnail_url=cloudinary_url or "",
-                                        thumbnail_local_path=results["thumb_img"])
+                                        thumbnail_local_path=thumb_img)
                 else:
                     results[key] = value
                     upsert_metadata(video_id, **{key: results[key]})
             except Exception as e:
                 if key == "thumbnail":
-                    results["thumb_desc"] = f"Error: {e}"
+                    # Ignore thumbnail failures for Generate All output stream.
+                    pass
                 else:
                     results[key] = f"Error: {e}"
 
@@ -725,8 +727,7 @@ def generate_all_video(video_id, transcript, raw_tags, segments, video_path,
             progress(0.22 + (completed / n) * 0.78,
                      desc=f"✅ {key} complete ({completed}/{n})")
             yield (results["tags"], results["title"], results["description"],
-                   results["caption"], results["hashtags"], results["chapters"],
-                   results["thumb_img"], results["thumb_desc"], tags_list)
+                     results["caption"], results["hashtags"], results["chapters"],None, "",tags_list)
 
 
 # ─── Regenerate All from DB ────────────────────────────────────────────────────
@@ -734,11 +735,11 @@ def generate_all_video(video_id, transcript, raw_tags, segments, video_path,
 def regenerate_all_video(video_id, segments, video_path, progress=gr.Progress()):
     """Fetch stored transcript from SQLite and regenerate all metadata."""
     if not video_id:
-        yield ("",) * 10
+        yield ("", "", "", "", "", "", "", None, "", [])
         return
     transcript = get_transcript(video_id)
     if not transcript:
-        yield ("⚠️ No transcript in database.",) + ("",) * 9
+        yield ("⚠️ No transcript in database.", "", "", "", "", "", "", None, "", [])
         return
     raw_tags = _extract_raw_tags(transcript)
     for partial in generate_all_video(video_id, transcript, raw_tags,
@@ -824,10 +825,15 @@ def regenerate_all_transcript(video_id, progress=gr.Progress()):
 
 # ─── Gradio UI ─────────────────────────────────────────────────────────────────
 
-with gr.Blocks(css=custom_css, title="MetaFuse",
-               theme=gr.themes.Soft(
-                   primary_hue="purple", secondary_hue="purple",
-                   neutral_hue="gray", font=gr.themes.GoogleFont("Inter"))) as app:
+app_theme = gr.themes.Soft(
+    primary_hue="purple",
+    secondary_hue="purple",
+    neutral_hue="gray",
+    font=gr.themes.GoogleFont("Inter"),
+)
+
+
+with gr.Blocks(title="MetaFuse") as app:
 
     gr.HTML("""
         <div class="main-header">
@@ -852,14 +858,40 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
             vid_session_history  = gr.State([])
 
             with gr.Column(visible=True) as upload_step_v:
-                gr.HTML('<div class="panel-title">Upload Video</div>')
-                video_input = gr.Video(label="Drop your video here",
-                                       sources=["upload"],
-                                       elem_classes=["upload-area"])
-                upload_notice_v = gr.Markdown(value="", visible=False)
-                process_btn = gr.Button("🚀 Process & Upload",
-                                        variant="primary", size="lg",
-                                        elem_classes=["primary-btn"])
+                with gr.Row(equal_height=False):
+                    # Left column: Upload & Progress
+                    with gr.Column(scale=4, elem_classes=["workspace-left"]):
+                        gr.HTML('<div class="panel-title">Upload Video</div>')
+                        video_input = gr.Video(label="Drop your video here",
+                                               sources=["upload"],
+                                               elem_classes=["upload-area"])
+                        upload_notice_v = gr.Markdown(value="", visible=False)
+
+                        # Progress indicator
+                        progress_indicator_v = gr.HTML(
+                            value=('<div style="background:#F5F3FF;border:2px solid #E9D5FF;'
+                                   'border-radius:12px;padding:16px;text-align:center;'
+                                   'color:#6B7280;font-size:0.95rem;">Ready to process a video</div>'),
+                            visible=True
+                        )
+
+                        process_btn = gr.Button("🚀 Process & Upload",
+                                                variant="primary", size="lg",
+                                                elem_classes=["primary-btn"])
+
+                    # Right column: History
+                    with gr.Column(scale=6, elem_classes=["workspace-right"]):
+                        gr.HTML('<div class="panel-title">Recent History</div>')
+                        history_html_upload = gr.HTML(value=_render_history_html(video_ids=[]))
+                        history_selector_upload = gr.Radio(
+                            label="📚 Click History Item to Load",
+                            choices=_history_choices(video_ids=[]),
+                            value=None,
+                            interactive=True,
+                        )
+                        delete_history_btn_upload = gr.Button("🗑️ Delete Selected",
+                                                              variant="secondary",
+                                                              elem_classes=["regen-btn"])
 
             with gr.Column(visible=False) as workspace_step_v:
                 back_btn_v = gr.Button("⬅ Back to Upload",
@@ -959,12 +991,36 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
 
             # ── Button wiring ─────────────────────────────────────────────────
 
+            def update_progress_indicator(video_file, progress=gr.Progress()):
+                """Wrapper to update progress indicator while processing."""
+                if video_file is None:
+                    return process_video_and_open_workspace(video_file, progress) + (
+                        gr.update(value='<div style="background:#FEE2E2;border:2px solid #FECACA;'
+                                       'border-radius:12px;padding:16px;text-align:center;'
+                                       'color:#DC2626;font-size:0.95rem;">⚠️ Please upload a video file</div>'),
+                    )
+
+                result = process_video_and_open_workspace(video_file, progress)
+
+                # Update progress indicator based on result
+                status_text = str(result[0] or "")
+                if status_text.startswith("✅"):
+                    indicator_html = ('<div style="background:#DCFCE7;border:2px solid #86EFAC;'
+                                     'border-radius:12px;padding:16px;text-align:center;'
+                                     'color:#166534;font-size:0.95rem;">✅ Video processed successfully!</div>')
+                else:
+                    indicator_html = ('<div style="background:#FEE2E2;border:2px solid #FECACA;'
+                                     'border-radius:12px;padding:16px;text-align:center;'
+                                     'color:#DC2626;font-size:0.95rem;">❌ Processing failed</div>')
+
+                return result + (gr.update(value=indicator_html),)
+
             process_btn.click(
-                fn=process_video_and_open_workspace,
+                fn=update_progress_indicator,
                 inputs=[video_input],
                 outputs=[status_box_v, transcript_box_v, vid_id, vid_segments,
                          vid_raw_tags, vid_path, meta_col_v, history_html, history_selector,
-                         upload_step_v, workspace_step_v, upload_notice_v],
+                         upload_step_v, workspace_step_v, upload_notice_v, progress_indicator_v],
                 show_progress=True,
             ).then(
                 fn=lambda t: t,
@@ -974,6 +1030,56 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
                 fn=_update_session_history,
                 inputs=[vid_session_history, vid_id],
                 outputs=[vid_session_history, history_html, history_selector],
+            ).then(
+                fn=_update_session_history,
+                inputs=[vid_session_history, vid_id],
+                outputs=[vid_session_history, history_html_upload, history_selector_upload],
+            )
+
+            history_selector_upload.change(
+                fn=load_history_item,
+                inputs=[history_selector_upload],
+                outputs=[
+                    status_box_v, transcript_box_v, vid_id, vid_segments,
+                    vid_raw_tags, vid_path, meta_col_v, history_html,
+                    tags_box_v, title_box_v, desc_box_v, caption_box_v,
+                    hashtags_box_v, chapters_box_v, thumb_img_v, thumb_desc_v,
+                    vid_tags, history_selector,
+                ],
+                show_progress=True,
+            ).then(
+                fn=lambda t: t,
+                inputs=[transcript_box_v],
+                outputs=[vid_transcript_state],
+            ).then(
+                fn=_update_session_history,
+                inputs=[vid_session_history, vid_id],
+                outputs=[vid_session_history, history_html_upload, history_selector_upload],
+            )
+
+            delete_history_btn_upload.click(
+                fn=delete_selected_history_item,
+                inputs=[history_selector_upload, vid_session_history],
+                outputs=[
+                    status_box_v, transcript_box_v, vid_id, vid_segments,
+                    vid_raw_tags, vid_path, meta_col_v, history_html,
+                    tags_box_v, title_box_v, desc_box_v, caption_box_v,
+                    hashtags_box_v, chapters_box_v, thumb_img_v, thumb_desc_v,
+                    vid_tags, history_selector, vid_session_history,
+                ],
+                show_progress=True,
+            ).then(
+                fn=lambda t: t,
+                inputs=[transcript_box_v],
+                outputs=[vid_transcript_state],
+            ).then(
+                fn=lambda ids: ids,
+                inputs=[vid_session_history],
+                outputs=[vid_session_history],
+            ).then(
+                fn=_update_session_history,
+                inputs=[vid_session_history, vid_id],
+                outputs=[vid_session_history, history_html_upload, history_selector_upload],
             )
 
             back_btn_v.click(
@@ -1053,15 +1159,15 @@ with gr.Blocks(css=custom_css, title="MetaFuse",
                 outputs=[chapters_box_v],
                 show_progress=True,
             )
-            # thumb_btn_v.click(
-            #     fn=gen_thumbnail,
-            #     inputs=[vid_id, title_box_v, vid_transcript_state, vid_tags],
-            #     outputs=[thumb_img_v, thumb_desc_v],
-            #     show_progress=True,
-            # )
+            thumb_btn_v.click(
+                fn=gen_thumbnail,
+                inputs=[vid_id, title_box_v, vid_transcript_state, vid_tags],
+                outputs=[thumb_img_v, thumb_desc_v],
+                show_progress=True,
+            )
 
             _ALL_V = [tags_box_v, title_box_v, desc_box_v, caption_box_v,
-                      hashtags_box_v, chapters_box_v, vid_tags]
+                      hashtags_box_v, chapters_box_v, thumb_img_v, thumb_desc_v, vid_tags]
 
             gen_all_btn_v.click(
                 fn=generate_all_video,
@@ -1224,5 +1330,7 @@ if __name__ == "__main__":
         server_port=8002,
         share=False,
         show_error=True,
+        css=custom_css,
+        theme=app_theme,
     )
 

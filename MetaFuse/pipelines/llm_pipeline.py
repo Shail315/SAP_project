@@ -17,7 +17,7 @@ def get_llm():
     return ChatOpenAI(
         model=cfg["llm"]["model"],
         openai_api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
+        base_url="https://models.github.ai/inference",
         temperature=cfg["llm"]["temperature"],
         max_tokens=cfg["llm"].get("max_tokens", 1024)
     )
